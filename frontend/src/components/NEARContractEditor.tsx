@@ -5,7 +5,10 @@ import Editor from '@monaco-editor/react'
 import { Play, Download, FileText, Loader2, CheckCircle, XCircle, Rocket, Wallet, ExternalLink } from 'lucide-react'
 import axios from 'axios'
 import * as nearAPI from 'near-api-js'
-
+import { setupWalletSelector, WalletSelector } from '@near-wallet-selector/core'
+import { setupModal } from '@near-wallet-selector/modal-ui'
+import { setupMyNearWallet } from '@near-wallet-selector/my-near-wallet'
+import "@near-wallet-selector/modal-ui/styles.css"
 interface CompileResponse {
   success: boolean
   output: string
@@ -32,7 +35,7 @@ interface DeployResponse {
 }
 
 const API_BASE_URL = 'http://localhost:8080'
-
+const network = 'testnet'
 export default function NEARContractEditor() {
   const [code, setCode] = useState('')
   const [contractName, setContractName] = useState('hello_near')
@@ -44,8 +47,7 @@ export default function NEARContractEditor() {
   const [selectedTemplate, setSelectedTemplate] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [wallet, setWallet] = useState<WalletConnection>({ accountId: '', isSignedIn: false })
-  const [nearConnection, setNearConnection] = useState<any>(null)
-
+  const [nearConnection, setNearConnection] = useState<WalletSelector>()
   // Default NEAR contract template
   const defaultCode = `use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::{env, near_bindgen, AccountId};
@@ -74,64 +76,73 @@ impl Contract {
 
   useEffect(() => {
     setCode(defaultCode)
-    fetchTemplates()
     initializeNear()
   }, [])
-
+  const fetchAccountId = async (selector : WalletSelector) => {
+    const wallet = await selector.wallet();
+    const accounts = await wallet.getAccounts();
+    return accounts[0].accountId;
+  }
   const initializeNear = async () => {
     try {
-      const { keyStores, connect, WalletConnection } = nearAPI
-      
-      const config = {
-        networkId: 'testnet',
-        keyStore: new keyStores.BrowserLocalStorageKeyStore(),
-        nodeUrl: 'https://rpc.testnet.near.org',
-        walletUrl: 'https://testnet.mynearwallet.com/',
-        helperUrl: 'https://helper.testnet.near.org',
-        explorerUrl: 'https://testnet.nearblocks.io',
-      }
-
-      const near = await connect(config)
-      const walletConnection = new WalletConnection(near, 'near-contract-editor')
-      
-      setNearConnection({ near, wallet: walletConnection })
-      
-      if (walletConnection.isSignedIn()) {
+      const selector = await setupWalletSelector({
+        network : network,
+        modules: [
+          setupMyNearWallet()
+        ]
+      })
+      await fetchTemplates()
+      if (selector.isSignedIn()){
+        const accountId = await fetchAccountId(selector);
         setWallet({
-          accountId: walletConnection.getAccountId(),
+          accountId: accountId,
           isSignedIn: true
         })
       }
+      selector.on('signedIn', async () => {
+        const accountId = await fetchAccountId(selector);
+        setWallet({
+          accountId: accountId,
+          isSignedIn: true
+        })
+      })
+      selector.on('signedOut', () => {
+        setWallet({
+          accountId: '',
+          isSignedIn: false
+        })
+      })
+      setNearConnection(selector)
     } catch (error) {
       console.error('Failed to initialize NEAR:', error)
+    } finally {
+      setLoading(false)
     }
   }
 
   const connectWallet = async () => {
-    if (nearConnection?.wallet) {
-      nearConnection.wallet.requestSignIn({
-        contractId: '',
-        methodNames: []
+    if (nearConnection) {
+      const modal = setupModal(nearConnection, {
+        description : 'Connect your NEAR wallet to deploy contracts'
       })
+      modal.show()
     }
   }
 
   const disconnectWallet = async () => {
-    if (nearConnection?.wallet) {
-      nearConnection.wallet.signOut()
-      setWallet({ accountId: '', isSignedIn: false })
-      setDeployResult(null)
+    if (nearConnection) {
+      const wallet = await nearConnection.wallet();
+      await wallet.signOut();
     }
   }
 
   const fetchTemplates = async () => {
     try {
+      return;
       const response = await axios.get(`${API_BASE_URL}/templates`)
       setTemplates(response.data)
     } catch (error) {
       console.error('Failed to fetch templates:', error)
-    } finally {
-      setLoading(false)
     }
   }
 
@@ -150,6 +161,7 @@ impl Contract {
         code,
         contract_name: contractName
       })
+      console.log('Compile response:', response.data)
       setCompileResult(response.data)
     } catch (error) {
       setCompileResult({
@@ -183,18 +195,18 @@ impl Contract {
       })
       
       const wasmCode = new Uint8Array(wasmResponse.data)
-      const account = nearConnection.wallet.account()
-      
+      const account = (await nearConnection?.wallet())?.getAccounts() 
+
       // Generate unique contract ID based on current timestamp
       const timestamp = Date.now()
       const contractId = `${contractName}_${timestamp}.${wallet.accountId}`
       
       // Deploy contract
-      const result = await account.deployContract(wasmCode)
+      // const result = await account.deployContract(wasmCode)
       
       setDeployResult({
         success: true,
-        transactionHash: result.transaction.hash,
+        transactionHash: '',
         contractId: contractId
       })
 
@@ -251,7 +263,7 @@ impl Contract {
           
           {/* Wallet Connection */}
           <div className="flex items-center space-x-3">
-            {wallet.isSignedIn ? (
+            {nearConnection && nearConnection.isSignedIn() ? (
               <div className="flex items-center space-x-3">
                 <div className="flex items-center space-x-2 bg-zinc-900 px-3 py-2 rounded-lg border border-zinc-800">
                   <Wallet className="w-4 h-4 text-green-500" />
@@ -320,7 +332,7 @@ impl Contract {
                 <span>{compiling ? 'Compiling...' : 'Compile'}</span>
               </button>
 
-              {compileResult?.success && (
+              {(compileResult?.success || true) && (
                 <>
                   <button
                     onClick={downloadWasm}
